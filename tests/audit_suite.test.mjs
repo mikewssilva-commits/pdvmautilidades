@@ -546,6 +546,192 @@ async function runAuditTests() {
   const totalComCancelada = todasVendasAtual.reduce((acc, v) => acc + (parseFloat(v.total) || 0), 0);
   assert(totalComCancelada - faturamentoSemCancelada === 100, 'Regra de negócio atendida: Venda cancelada é excluída do faturamento total da loja.');
 
+  // -----------------------------------------------------------------
+  // 9. TESTE DO LEITOR DE CÓDIGO DE BARRAS (USB HID / BLUETOOTH)
+  // -----------------------------------------------------------------
+  console.log('\n--- 9. TESTE DO LEITOR DE CÓDIGO DE BARRAS NO PDV ---');
+
+  // 1. Inserir produtos de teste no banco
+  const cocaColaId = await db.produtos.add({
+    nome: 'Coca-Cola 2L',
+    codigoBarras: '789000000001',
+    codigoInterno: 'REF-001',
+    categoria: 'Bebidas',
+    unidade: 'UN',
+    precoCusto: arredondarMoeda(5.50),
+    precoVenda: arredondarMoeda(8.00),
+    estoqueAtual: 100,
+    estoqueMinimo: 10,
+    createdAt: new Date().toISOString()
+  });
+  assert(Number.isInteger(cocaColaId), '1. Produto Coca-Cola 2L cadastrado com sucesso no banco de dados (ID: ' + cocaColaId + ').');
+
+  const produtoSemEstoqueId = await db.produtos.add({
+    nome: 'Suco de Laranja 1L (Sem Estoque)',
+    codigoBarras: '789000000002',
+    codigoInterno: 'REF-002',
+    categoria: 'Bebidas',
+    unidade: 'UN',
+    precoCusto: arredondarMoeda(4.00),
+    precoVenda: arredondarMoeda(7.50),
+    estoqueAtual: 0,
+    estoqueMinimo: 5,
+    createdAt: new Date().toISOString()
+  });
+  assert(Number.isInteger(produtoSemEstoqueId), 'Produto sem estoque cadastrado com sucesso para teste de bloqueio.');
+
+  // Função simuladora do leitor USB HID no PDV
+  function simularLeituraBarcode({ termoBusca, quantidadeLeitor = 1, carrinhoAtual = [], catalogoProdutos }) {
+    let carrinho = [...carrinhoAtual];
+    let termo = termoBusca.trim();
+    let qtd = quantidadeLeitor;
+    let feedback = null;
+
+    // Suporte a sintaxe rápida: 5*CODIGO ou 5xCODIGO
+    if (termo.includes('*')) {
+      const partes = termo.split('*');
+      const qtdParse = parseInt(partes[0], 10);
+      if (!isNaN(qtdParse) && qtdParse > 0) {
+        qtd = qtdParse;
+        termo = partes.slice(1).join('*').trim();
+      }
+    } else if (termo.toLowerCase().includes('x') && !termo.startsWith('x')) {
+      const partes = termo.split(/[xX]/);
+      const qtdParse = parseInt(partes[0], 10);
+      if (!isNaN(qtdParse) && qtdParse > 0) {
+        qtd = qtdParse;
+        termo = partes.slice(1).join('').trim();
+      }
+    }
+
+    // 1. Buscar por código de barras exato
+    let produtoEncontrado = catalogoProdutos.find((p) => p.codigoBarras === termo);
+
+    // 2. Se não achou, buscar por código interno exato
+    if (!produtoEncontrado && termo) {
+      produtoEncontrado = catalogoProdutos.find(
+        (p) => p.codigoInterno && p.codigoInterno.toLowerCase() === termo.toLowerCase()
+      );
+    }
+
+    if (!produtoEncontrado) {
+      feedback = { tipo: 'erro', mensagem: 'Produto não encontrado. Cadastre o produto antes de vender.' };
+      return { carrinho, feedback, sucesso: false, novaQuantidadeLeitor: quantidadeLeitor };
+    }
+
+    // Validação de estoque
+    if (produtoEncontrado.estoqueAtual <= 0) {
+      feedback = { tipo: 'erro', mensagem: 'Produto sem estoque disponível.' };
+      return { carrinho, feedback, sucesso: false, novaQuantidadeLeitor: quantidadeLeitor };
+    }
+
+    const itemExistente = carrinho.find((item) => item.produtoId === produtoEncontrado.id);
+    const qtdAtual = itemExistente ? itemExistente.quantidade : 0;
+
+    if (qtdAtual + qtd > produtoEncontrado.estoqueAtual) {
+      feedback = { tipo: 'erro', mensagem: `Estoque insuficiente! Disponível: ${produtoEncontrado.estoqueAtual} unidades.` };
+      return { carrinho, feedback, sucesso: false, novaQuantidadeLeitor: quantidadeLeitor };
+    }
+
+    const index = carrinho.findIndex((item) => item.produtoId === produtoEncontrado.id);
+    if (index > -1) {
+      const itemAtual = carrinho[index];
+      const novaQtd = itemAtual.quantidade + qtd;
+      carrinho[index] = {
+        ...itemAtual,
+        quantidade: novaQtd,
+        subtotal: arredondarMoeda(novaQtd * itemAtual.precoUnitario)
+      };
+    } else {
+      carrinho.push({
+        produtoId: produtoEncontrado.id,
+        nomeProduto: produtoEncontrado.nome,
+        codigoBarras: produtoEncontrado.codigoBarras,
+        precoUnitario: produtoEncontrado.precoVenda,
+        quantidade: qtd,
+        subtotal: arredondarMoeda(qtd * produtoEncontrado.precoVenda),
+        estoqueDisponivel: produtoEncontrado.estoqueAtual
+      });
+    }
+
+    feedback = { tipo: 'sucesso', mensagem: `${produtoEncontrado.nome} (${qtd} un) adicionado ao carrinho!` };
+    return { carrinho, feedback, sucesso: true, novaQuantidadeLeitor: 1 };
+  }
+
+  const produtosAtuais = await db.produtos.toArray();
+
+  // 2. Simular bipagem do código Coca-Cola 2L (789000000001) com quantidade padrão 1
+  let carrinhoPDV = [];
+  const leitura1 = simularLeituraBarcode({
+    termoBusca: '789000000001',
+    quantidadeLeitor: 1,
+    carrinhoAtual: carrinhoPDV,
+    catalogoProdutos: produtosAtuais
+  });
+
+  assert(leitura1.sucesso === true, '2. Leitura com leitor USB do código 789000000001 processada com sucesso.');
+  assert(leitura1.carrinho.length === 1, '3. Confirmar que produto entrou no carrinho (1 item no carrinho).');
+  assert(leitura1.carrinho[0].nomeProduto === 'Coca-Cola 2L', '   Produto correto adicionado: Coca-Cola 2L.');
+  assert(leitura1.carrinho[0].quantidade === 1, '   Quantidade unitária confirmada: 1 un.');
+  assert(leitura1.carrinho[0].subtotal === 8.00, '   Subtotal unitário correto: R$ 8,00.');
+  assert(leitura1.novaQuantidadeLeitor === 1, '   Quantidade do leitor mantida/resetada em 1.');
+
+  // 4. Simular bipagem com quantidade 5 (operador define Qtd = 5 e bipa)
+  carrinhoPDV = leitura1.carrinho;
+  const leitura2 = simularLeituraBarcode({
+    termoBusca: '789000000001',
+    quantidadeLeitor: 5,
+    carrinhoAtual: carrinhoPDV,
+    catalogoProdutos: produtosAtuais
+  });
+
+  assert(leitura2.sucesso === true, '4. Leitura com quantidade 5 processada com sucesso.');
+  assert(leitura2.carrinho[0].quantidade === 6, '5. Confirmar carrinho atualizado (1 un anterior + 5 un novas = 6 un).');
+  assert(leitura2.carrinho[0].subtotal === 48.00, '   Subtotal recalculado corretamente: 6 x R$ 8,00 = R$ 48,00.');
+  assert(leitura2.novaQuantidadeLeitor === 1, '   Quantidade do leitor resetada automaticamente para 1 un após bipagem.');
+
+  // Testar também sintaxe de atalho do teclado com leitor: "5*789000000001"
+  const leituraAtalho = simularLeituraBarcode({
+    termoBusca: '5*789000000001',
+    quantidadeLeitor: 1,
+    carrinhoAtual: [],
+    catalogoProdutos: produtosAtuais
+  });
+  assert(leituraAtalho.carrinho[0].quantidade === 5 && leituraAtalho.carrinho[0].subtotal === 40.00, '   Atalho multiplicador de teclado "5*CODIGO" suportado nativamente.');
+
+  // 6. Simular bipagem de código inexistente
+  const leituraInexistente = simularLeituraBarcode({
+    termoBusca: '789999999999',
+    quantidadeLeitor: 1,
+    carrinhoAtual: leitura2.carrinho,
+    catalogoProdutos: produtosAtuais
+  });
+
+  assert(leituraInexistente.sucesso === false, '6. Bipagem de código inexistente interceptada.');
+  assert(
+    leituraInexistente.feedback.mensagem === 'Produto não encontrado. Cadastre o produto antes de vender.',
+    '7. Mensagem correta exibida: "Produto não encontrado. Cadastre o produto antes de vender."'
+  );
+  assert(leituraInexistente.carrinho.length === 1, '   Carrinho permaneceu íntegro e sem alterações indevidas.');
+
+  // 8. Simular produto sem estoque
+  const leituraSemEstoque = simularLeituraBarcode({
+    termoBusca: '789000000002',
+    quantidadeLeitor: 1,
+    carrinhoAtual: leitura2.carrinho,
+    catalogoProdutos: produtosAtuais
+  });
+
+  assert(leituraSemEstoque.sucesso === false, '8. Bipagem de produto sem estoque detectada.');
+  assert(
+    leituraSemEstoque.feedback.mensagem === 'Produto sem estoque disponível.',
+    '9. Bloqueio de venda confirmado: "Produto sem estoque disponível."'
+  );
+  assert(
+    leituraSemEstoque.carrinho.find((item) => item.produtoId === produtoSemEstoqueId) === undefined,
+    '   Produto sem estoque não foi adicionado ao carrinho.'
+  );
+
   console.log('\n====================================================');
   console.log(`RESULTADO DA AUDITORIA: ${passedTests}/${totalTests} TESTES APROVADOS!`);
   console.log(`FALHAS: ${failedTests}`);

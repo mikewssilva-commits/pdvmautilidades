@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
-  Search, 
   Barcode, 
   Plus, 
   Minus, 
@@ -10,7 +9,8 @@ import {
   ArrowRight,
   ArrowLeft,
   Layers,
-  Sparkles
+  Sparkles,
+  AlertTriangle
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { db, CATEGORIAS_PADRAO } from '../../db/db';
@@ -24,6 +24,10 @@ export default function POSView({ config, clientes = [], onVendaFinalizada, onVo
   const [categoriaAtiva, setCategoriaAtiva] = useState('todos');
   const [produtosDisponiveis, setProdutosDisponiveis] = useState([]);
   const [produtosFiltrados, setProdutosFiltrados] = useState([]);
+
+  // Suporte a Leitor USB HID & Quantidade Múltipla
+  const [quantidadeLeitor, setQuantidadeLeitor] = useState(1);
+  const [feedbackLeitor, setFeedbackLeitor] = useState(null); // { tipo: 'sucesso' | 'erro', mensagem: string }
   
   // Carrinho da venda
   const [carrinho, setCarrinho] = useState([]);
@@ -55,19 +59,35 @@ export default function POSView({ config, clientes = [], onVendaFinalizada, onVo
     }
   }, []);
 
+  // Feedback visual e sonoro não-bloqueante para o leitor de código de barras
+  const exibirFeedbackLeitor = useCallback((tipo, mensagem) => {
+    setFeedbackLeitor({ tipo, mensagem });
+    if (tipo === 'erro') {
+      soundFX.playAlert();
+    } else {
+      soundFX.playBeep();
+    }
+    setTimeout(() => {
+      setFeedbackLeitor((prev) => (prev?.mensagem === mensagem ? null : prev));
+    }, 4500);
+  }, []);
+
   // Limpar todo o carrinho
   const handleLimparCarrinho = useCallback(() => {
     if (carrinho.length === 0) return;
     if (window.confirm('Tem certeza que deseja cancelar a venda atual e limpar o carrinho?')) {
       setCarrinho([]);
       setDesconto(0);
+      setQuantidadeLeitor(1);
       if (searchInputRef.current) searchInputRef.current.focus();
     }
   }, [carrinho.length]);
 
-  // Atalhos globais de teclado (F2 = Buscar, F4 = Finalizar, F9 = Limpar carrinho)
+  // Atalhos globais de teclado e captura inteligente do leitor USB HID
   useEffect(() => {
     const handleKeyDown = (e) => {
+      if (document.querySelector('.modal-backdrop')) return;
+
       if (e.key === 'F2') {
         e.preventDefault();
         if (searchInputRef.current) searchInputRef.current.focus();
@@ -80,6 +100,21 @@ export default function POSView({ config, clientes = [], onVendaFinalizada, onVo
         e.preventDefault();
         if (carrinho.length > 0) {
           handleLimparCarrinho();
+        }
+      } else {
+        // Redirecionamento inteligente do leitor USB HID:
+        // Se o operador começar a bipar enquanto o foco está fora do input,
+        // redireciona o foco para o campo de leitura sem perder a digitação.
+        const activeEl = document.activeElement;
+        const isEditingOtherField = activeEl && (
+          activeEl.tagName === 'INPUT' || 
+          activeEl.tagName === 'TEXTAREA' || 
+          activeEl.tagName === 'SELECT'
+        );
+        if (!isEditingOtherField && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+          if (searchInputRef.current && searchInputRef.current !== activeEl) {
+            searchInputRef.current.focus();
+          }
         }
       }
     };
@@ -108,33 +143,35 @@ export default function POSView({ config, clientes = [], onVendaFinalizada, onVo
     setProdutosFiltrados(filtrados);
   }, [termoBusca, categoriaAtiva, produtosDisponiveis]);
 
-  // Adicionar produto ao carrinho
+  // Adicionar produto ao carrinho com suporte a quantidade e validação não-bloqueante
   const handleAdicionarProduto = (produto, qtd = 1) => {
+    const qtdNum = Math.max(1, parseInt(qtd, 10) || 1);
+
     if (produto.estoqueAtual <= 0) {
-      soundFX.playAlert();
-      alert(`O produto "${produto.nome}" está com estoque esgotado!`);
-      return;
+      exibirFeedbackLeitor('erro', 'Produto sem estoque disponível.');
+      return false;
+    }
+
+    const itemExistente = carrinho.find((item) => item.produtoId === produto.id);
+    const qtdAtual = itemExistente ? itemExistente.quantidade : 0;
+
+    if (qtdAtual + qtdNum > produto.estoqueAtual) {
+      exibirFeedbackLeitor('erro', `Estoque insuficiente! Disponível: ${produto.estoqueAtual} unidades.`);
+      return false;
     }
 
     soundFX.playBeep();
 
     setCarrinho((prev) => {
-      const existenteIndex = prev.findIndex((item) => item.produtoId === produto.id);
-
-      if (existenteIndex > -1) {
-        const itemExistente = prev[existenteIndex];
-        const novaQtd = itemExistente.quantidade + qtd;
-
-        if (novaQtd > produto.estoqueAtual) {
-          alert(`Estoque insuficiente! Disponível: ${produto.estoqueAtual} unidades.`);
-          return prev;
-        }
-
+      const index = prev.findIndex((item) => item.produtoId === produto.id);
+      if (index > -1) {
+        const atual = prev[index];
+        const novaQtd = atual.quantidade + qtdNum;
         const atualizado = [...prev];
-        atualizado[existenteIndex] = {
-          ...itemExistente,
+        atualizado[index] = {
+          ...atual,
           quantidade: novaQtd,
-          subtotal: novaQtd * itemExistente.precoUnitario
+          subtotal: arredondarMoeda(novaQtd * atual.precoUnitario)
         };
         return atualizado;
       } else {
@@ -146,8 +183,8 @@ export default function POSView({ config, clientes = [], onVendaFinalizada, onVo
             codigoBarras: produto.codigoBarras,
             categoria: produto.categoria,
             precoUnitario: produto.precoVenda,
-            quantidade: qtd,
-            subtotal: qtd * produto.precoVenda,
+            quantidade: qtdNum,
+            subtotal: arredondarMoeda(qtdNum * produto.precoVenda),
             estoqueDisponivel: produto.estoqueAtual,
             foto: produto.foto
           }
@@ -155,35 +192,70 @@ export default function POSView({ config, clientes = [], onVendaFinalizada, onVo
       }
     });
 
+    exibirFeedbackLeitor('sucesso', `${produto.nome} (${qtdNum} un) adicionado ao carrinho!`);
+
     // Manter o foco no input para próxima bipagem contínua
     if (searchInputRef.current) {
       searchInputRef.current.focus();
     }
+    return true;
   };
 
-  // Tratamento da tecla Enter no input (ideal para leitor de código de barras físico)
+  // Tratamento da tecla Enter no input (leitor de código de barras USB HID e Bluetooth)
   const handleKeyDownBusca = (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      const termo = termoBusca.trim();
+      let termo = termoBusca.trim();
       if (!termo) return;
 
-      // Buscar por código de barras exato primeiro
+      let qtd = quantidadeLeitor;
+
+      // Suporte a sintaxe rápida: 5*CODIGO ou 5xCODIGO
+      if (termo.includes('*')) {
+        const partes = termo.split('*');
+        const qtdParse = parseInt(partes[0], 10);
+        if (!isNaN(qtdParse) && qtdParse > 0) {
+          qtd = qtdParse;
+          termo = partes.slice(1).join('*').trim();
+        }
+      } else if (termo.toLowerCase().includes('x') && !termo.startsWith('x')) {
+        const partes = termo.split(/[xX]/);
+        const qtdParse = parseInt(partes[0], 10);
+        if (!isNaN(qtdParse) && qtdParse > 0) {
+          qtd = qtdParse;
+          termo = partes.slice(1).join('').trim();
+        }
+      }
+
+      // 1. Buscar por código de barras exato
       let produtoEncontrado = produtosDisponiveis.find((p) => p.codigoBarras === termo);
 
-      // Se não achou por código de barras exato, pegar o primeiro da lista filtrada
+      // 2. Se não achou por código de barras exato, buscar por código interno exato
+      if (!produtoEncontrado && termo) {
+        produtoEncontrado = produtosDisponiveis.find(
+          (p) => p.codigoInterno && p.codigoInterno.toLowerCase() === termo.toLowerCase()
+        );
+      }
+
+      // 3. Se ainda não achou e a lista filtrada tiver exatamente 1 item por busca textual
       if (!produtoEncontrado && produtosFiltrados.length === 1) {
         produtoEncontrado = produtosFiltrados[0];
       }
 
       if (produtoEncontrado) {
-        handleAdicionarProduto(produtoEncontrado, 1);
-        setTermoBusca(''); // Limpa o leitor para o próximo item
-      } else if (produtosFiltrados.length > 0) {
-        handleAdicionarProduto(produtosFiltrados[0], 1);
-        setTermoBusca('');
+        const adicionou = handleAdicionarProduto(produtoEncontrado, qtd);
+        if (adicionou) {
+          setTermoBusca('');
+          setQuantidadeLeitor(1); // Reseta a quantidade para 1 após leitura com sucesso
+        }
       } else {
-        soundFX.playAlert();
+        // Mensagem exata solicitada: não trava o sistema
+        exibirFeedbackLeitor('erro', 'Produto não encontrado. Cadastre o produto antes de vender.');
+        setTermoBusca('');
+      }
+
+      if (searchInputRef.current) {
+        searchInputRef.current.focus();
       }
     }
   };
@@ -431,21 +503,67 @@ export default function POSView({ config, clientes = [], onVendaFinalizada, onVo
             ====================================================================== */}
         <div className="pos-panel">
           <div className="search-panel-header">
-            <div className="search-input-wrapper">
-              <Search className="search-input-icon" size={22} />
-              <input
-                ref={searchInputRef}
-                type="text"
-                className="search-input search-input-giant"
-                placeholder="Digite o nome ou bipe o código de barras (F2)..."
-                value={termoBusca}
-                onChange={(e) => setTermoBusca(e.target.value)}
-                onKeyDown={handleKeyDownBusca}
-              />
+            {/* Bloco de Leitura com Multiplicador de Quantidade */}
+            <div className="barcode-scan-group">
+              <div className="barcode-qty-box" title="Quantidade para o próximo produto bipado">
+                <span className="barcode-qty-label">Qtd:</span>
+                <div className="barcode-qty-controls">
+                  <button
+                    type="button"
+                    className="btn-barcode-qty-step"
+                    onClick={() => setQuantidadeLeitor((prev) => Math.max(1, prev - 1))}
+                    title="Diminuir quantidade"
+                  >
+                    <Minus size={12} />
+                  </button>
+                  <input
+                    type="number"
+                    min="1"
+                    max="999"
+                    value={quantidadeLeitor}
+                    onChange={(e) => setQuantidadeLeitor(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                    className="barcode-qty-input"
+                  />
+                  <button
+                    type="button"
+                    className="btn-barcode-qty-step"
+                    onClick={() => setQuantidadeLeitor((prev) => prev + 1)}
+                    title="Aumentar quantidade"
+                  >
+                    <Plus size={12} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="search-input-wrapper">
+                <Barcode className="search-input-icon" size={24} color="#0F172A" />
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  className="search-input search-input-giant"
+                  placeholder="Bipar ou digitar código do produto..."
+                  value={termoBusca}
+                  onChange={(e) => setTermoBusca(e.target.value)}
+                  onKeyDown={handleKeyDownBusca}
+                />
+              </div>
             </div>
+
+            {/* Banner de Feedback em Tempo Real do Leitor */}
+            {feedbackLeitor && (
+              <div className={`barcode-feedback-banner ${feedbackLeitor.tipo}`}>
+                {feedbackLeitor.tipo === 'erro' ? (
+                  <AlertTriangle size={18} color="#DC2626" style={{ flexShrink: 0 }} />
+                ) : (
+                  <CheckCircle size={18} color="#16A34A" style={{ flexShrink: 0 }} />
+                )}
+                <span>{feedbackLeitor.mensagem}</span>
+              </div>
+            )}
+
             <div className="search-barcode-helper">
-              <span><Barcode size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} /> Leitor automático ativo</span>
-              <span>Pressione <strong>Enter</strong> para adicionar</span>
+              <span><Barcode size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} /> Leitor USB HID pronto • Enter automático</span>
+              <span>Dica: <strong>Qtd</strong> ou <strong>5*código</strong></span>
             </div>
           </div>
 

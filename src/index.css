@@ -880,6 +880,77 @@ html, body {
   flex-shrink: 0;
 }
 
+.barcode-scan-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.barcode-qty-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #FFFFFF;
+  border: 2.5px solid #CBD5E1;
+  border-radius: var(--radius-md);
+  padding: 4px 8px;
+  height: 52px;
+  flex-shrink: 0;
+}
+
+.barcode-qty-label {
+  font-size: 0.75rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  color: #64748B;
+}
+
+.barcode-qty-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.btn-barcode-qty-step {
+  background: #F1F5F9;
+  border: 1px solid var(--border-medium);
+  border-radius: 4px;
+  width: 22px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #1E293B;
+  transition: all 0.1s ease;
+}
+
+.btn-barcode-qty-step:hover {
+  background: var(--brand-yellow);
+  color: #000000;
+}
+
+.barcode-qty-input {
+  width: 36px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-weight: 900;
+  font-size: 1rem;
+  color: #0F172A;
+  outline: none;
+}
+
+.barcode-scan-group .search-input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+}
+
 .search-input-wrapper {
   position: relative;
   display: flex;
@@ -908,6 +979,30 @@ html, body {
 .search-input:focus {
   border-color: var(--brand-yellow);
   box-shadow: 0 0 0 3px rgba(234, 179, 8, 0.25);
+}
+
+.barcode-feedback-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin-top: 8px;
+  animation: fadeIn 0.15s ease;
+}
+
+.barcode-feedback-banner.sucesso {
+  background: #DCFCE7;
+  color: #15803D;
+  border: 1px solid #BBF7D0;
+}
+
+.barcode-feedback-banner.erro {
+  background: #FEE2E2;
+  color: #B91C1C;
+  border: 1.5px solid #FCA5A5;
 }
 
 .search-barcode-helper {
